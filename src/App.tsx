@@ -284,6 +284,9 @@ export default function App() {
     let arenaCleared = [false, false, false];
     let showGoSign = false;
     let goSignTimer = 0;
+    // Arena limpa: a câmera é liberada e o jogador anda até o gatilho da próxima arena
+    let advancing = false;
+    const NEXT_ARENA_TRIGGER = 60; // px dentro da próxima arena em que a câmera trava e os inimigos surgem
 
     // Arena boundaries
     const ARENA_WIDTH = 400;
@@ -444,6 +447,7 @@ export default function App() {
       arenaCleared = [false, false, false];
       showGoSign = false;
       goSignTimer = 0;
+      advancing = false;
       attackTokens = 0;
       spawnArenaEnemies(0);
     }
@@ -859,6 +863,7 @@ export default function App() {
           player.isDodging = false;
           player.invulnTimer = 0;
         }
+        applyArenaBounds();
         return;
       }
 
@@ -899,18 +904,18 @@ export default function App() {
             player.attackPhase = null;
             player.attackData = null;
             player.state = 'idle';
-            // Check combo buffer
-            if (player.inputBuffer && player.inputBuffer.timer > 0) {
-              processAttackInput();
-            }
+            // Consome o buffer UMA vez. Sem limpar, o golpe seguinte via o mesmo
+            // buffer de novo e o jogador ficava atacando para sempre.
+            const queued = player.inputBuffer !== null && player.inputBuffer.timer > 0;
+            player.inputBuffer = null;
+            if (queued) processAttackInput();
           }
         }
 
-        // BUG FIX #2: Read attack input DURING attack to fill the buffer
-        // This allows the combo to chain properly
+        // Qualquer J apertado durante o golpe entra na fila (1 vaga) e é
+        // consumido no fim do recovery.
         if (isKeyJustPressed('j')) {
-          // Buffer the attack input for later execution
-          player.inputBuffer = { action: 'attack', timer: 10 }; // Increased from 6 to 10 frames
+          player.inputBuffer = { action: 'attack', timer: 10 };
         }
 
         // Allow movement during attack (reduced)
@@ -919,6 +924,7 @@ export default function App() {
           player.x += ax * PLAYER_SPEED * 0.3;
           player.facing = ax > 0 ? 1 : -1;
         }
+        applyArenaBounds();
         return;
       }
 
@@ -1010,20 +1016,26 @@ export default function App() {
         }
       }
 
-      // Clamp player to arena bounds
-      const arena = ARENAS[currentArena];
-      player.x = Math.max(arena.x + 8, Math.min(arena.x + arena.w - 8, player.x));
+      applyArenaBounds();
+    }
 
-      // Arena transitions
-      if (currentArena < 2 && arenaCleared[currentArena]) {
-        if (showGoSign && isKeyJustPressed('j')) {
+    // Limites de movimento + transição de arena.
+    // Luta em andamento: jogador preso na arena atual.
+    // Arena limpa (advancing): sem parede à direita, o jogador anda de verdade até a
+    // próxima arena; ao cruzar o gatilho a câmera trava e os inimigos surgem.
+    function applyArenaBounds() {
+      const arena = ARENAS[currentArena];
+      if (advancing) {
+        const next = ARENAS[currentArena + 1];
+        player.x = Math.max(cameraX + 8, Math.min(next.x + next.w - 8, player.x));
+        if (player.x >= next.x + NEXT_ARENA_TRIGGER) {
           currentArena++;
+          advancing = false;
           showGoSign = false;
-          cameraX = ARENAS[currentArena].x;
-          cameraTargetX = ARENAS[currentArena].x;
-          player.x = ARENAS[currentArena].x + 40;
           spawnArenaEnemies(currentArena);
         }
+      } else {
+        player.x = Math.max(arena.x + 8, Math.min(arena.x + arena.w - 8, player.x));
       }
     }
 
@@ -1105,10 +1117,16 @@ export default function App() {
     // CAMERA
     // ============================================================
     function updateCamera() {
-      cameraTargetX = player.x - INTERNAL_W / 2;
-      // Clamp to arena
       const arena = ARENAS[currentArena];
-      cameraTargetX = Math.max(arena.x, Math.min(arena.x + arena.w - INTERNAL_W, cameraTargetX));
+      let minX = arena.x;
+      let maxX = arena.x + arena.w - INTERNAL_W;
+      if (advancing) {
+        // Câmera livre até o fim da próxima arena, mas nunca volta para trás
+        const next = ARENAS[currentArena + 1];
+        minX = Math.max(arena.x, cameraX);
+        maxX = next.x + next.w - INTERNAL_W;
+      }
+      cameraTargetX = Math.max(minX, Math.min(maxX, player.x - INTERNAL_W / 2));
       cameraX += (cameraTargetX - cameraX) * 0.08;
     }
 
@@ -1143,7 +1161,7 @@ export default function App() {
 
       // Far trees (parallax 0.2)
       ctx.fillStyle = PAL.darkGray;
-      for (let i = 0; i < 15; i++) {
+      for (let i = 0; i < 24; i++) {
         const tx = i * 60 - cx * 0.2;
         if (tx > -20 && tx < INTERNAL_W + 20) {
           // Dead tree silhouette
@@ -1157,7 +1175,7 @@ export default function App() {
 
       // Mid layer - tombstones (parallax 0.5)
       ctx.fillStyle = PAL.gray;
-      for (let i = 0; i < 10; i++) {
+      for (let i = 0; i < 20; i++) {
         const tx = i * 80 + 20 - cx * 0.5;
         if (tx > -15 && tx < INTERNAL_W + 15) {
           drawPixelRect(tx, GROUND_Y - 12, 8, 12, PAL.gray);
@@ -1410,7 +1428,7 @@ export default function App() {
       if (showGoSign) {
         const blink = Math.floor(frameCount / 15) % 2;
         if (blink) {
-          drawText('GO →', INTERNAL_W / 2 - 10, INTERNAL_H / 2 - 20, PAL.yellow, 2);
+          drawText('GO →', INTERNAL_W - 46, INTERNAL_H / 2 - 30, PAL.yellow, 2);
         }
       }
 
@@ -1575,6 +1593,7 @@ export default function App() {
               arenaCleared[currentArena] = true;
               if (currentArena < 2) {
                 showGoSign = true;
+                advancing = true;
                 goSignTimer = 0;
               } else {
                 // Victory!
