@@ -138,10 +138,20 @@ export default function App() {
       for (const [idx, name] of Object.entries(btnMap)) {
         const pressed = gp.buttons[parseInt(idx)]?.pressed || false;
         newBtns[name] = pressed;
+      }
+      gpState.buttons = newBtns;
+    }
+
+    // BUG FIX: Separate edge detection from state polling
+    // This ensures gamepad edges are only detected per logical update, not per render frame
+    function pollGamepadEdges() {
+      if (!gamepadConnected) return;
+      const btnMap: Record<number, string> = { 0: 'j', 1: 'k', 2: 'l', 3: 'i', 9: 'enter', 6: 'p' };
+      for (const [idx, name] of Object.entries(btnMap)) {
+        const pressed = gpState.buttons[name] || false;
         gpJustPressed[name] = pressed && !gpButtonsPrev[name];
       }
-      gpButtonsPrev = { ...newBtns };
-      gpState.buttons = newBtns;
+      gpButtonsPrev = { ...gpState.buttons };
     }
 
     function isKeyDown(k: string): boolean {
@@ -401,13 +411,13 @@ export default function App() {
         facing: -1,
         hp: c.hp, maxHp: c.hp,
         state: 'idle',
-        stateTimer: 60 + Math.random() * 60,
+        stateTimer: 30 + Math.random() * 30, // Reduzido para resposta mais rápida
         flashTimer: 0,
         dead: false,
         deathTimer: 0,
         type,
         aiState: 'idle',
-        aiTimer: 30 + Math.random() * 60,
+        aiTimer: 15 + Math.random() * 30, // Reduzido para resposta mais rápida
         attackToken: false,
         bossPhase: 1,
         bossTelegraph: 0,
@@ -541,14 +551,14 @@ export default function App() {
       // Check death
       if (enemy.hp <= 0) {
         enemy.dead = true;
-        enemy.deathTimer = 30;
+        enemy.deathTimer = 60; // Aumentado de 30 para 60 para dar tempo do voo
         sfxDeath();
         score += 100;
 
         // Extra knockback on death for finishers
         if (damage >= 18) {
           enemy.knockbackVx = player.facing * 8;
-          enemy.knockbackVy = -5;
+          enemy.knockbackVy = -2.5; // Reduzido de -5 para -2.5 para voo mais curto
         }
 
         // Blood pool
@@ -663,19 +673,19 @@ export default function App() {
           if (e.aiTimer <= 0) {
             if (distToPlayer > 60) {
               e.aiState = 'chase';
-              e.aiTimer = 60 + Math.random() * 60;
+              e.aiTimer = 30 + Math.random() * 30; // Reduzido de 60-120 para 30-60
             } else if (inRange && zInRange) {
               if (attackTokens < MAX_ATTACK_TOKENS) {
                 e.aiState = 'prepare_attack';
-                e.aiTimer = e.type === 'boss' ? 20 : 10;
+                e.aiTimer = e.type === 'boss' ? 15 : 8; // Reduzido para resposta mais rápida
                 attackTokens++;
                 e.attackToken = true;
               } else {
-                e.aiTimer = 10; // Wait for token
+                e.aiTimer = 8; // Wait for token (reduzido de 10)
               }
             } else {
               e.aiState = 'chase';
-              e.aiTimer = 60 + Math.random() * 60;
+              e.aiTimer = 30 + Math.random() * 30; // Reduzido de 60-120 para 30-60
             }
           }
           break;
@@ -1530,6 +1540,13 @@ export default function App() {
           if (hitstopFrames > 0) {
             hitstopFrames -= dt;
             updateScreenShake();
+            // BUG FIX: Process player input during hitstop so attack buffer works
+            // This allows players to queue the next attack during hitstop freeze
+            if (!player.dead && !player.isDodging && player.attackPhase) {
+              if (isKeyJustPressed('j')) {
+                player.inputBuffer = { action: 'attack', timer: 10 };
+              }
+            }
             break; // Freeze game logic during hitstop
           }
 
@@ -1649,27 +1666,24 @@ export default function App() {
       lastTime = timestamp;
       accumulator += Math.min(delta, 100); // Cap to prevent spiral of death
 
-      // Poll gamepad
+      // Poll gamepad state (can run every render frame)
       pollGamepad();
 
       // Fixed timestep updates
       // BUG FIX #1: Only clear input AFTER an update actually ran
-      let didUpdate = false;
       while (accumulator >= FRAME_TIME) {
+        // BUG FIX: Detect gamepad edges per logical update, not per render
+        pollGamepadEdges();
+        
         update(1); // dt = 1 frame
         accumulator -= FRAME_TIME;
-        didUpdate = true;
+        
         // Clear just-pressed keys right after each logical update
         keysThisFrame = {};
         for (const k in gpJustPressed) gpJustPressed[k] = false;
       }
 
       render();
-
-      // BUG FIX #1: Only clear if no update ran (edge case for safety)
-      if (!didUpdate) {
-        // Don't clear here - preserve input for next frame's update
-      }
 
       requestAnimationFrame(gameLoop);
     }
