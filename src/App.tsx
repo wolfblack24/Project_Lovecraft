@@ -498,6 +498,18 @@ export default function App() {
       enemy.knockbackVx = player.facing * knockback;
       enemy.knockbackVy = -knockback * 0.5;
 
+      // BUG FIX #6: Stun the enemy when hit (interrupts their attack)
+      if (!enemy.dead) {
+        enemy.aiState = 'stunned';
+        // Stun duration proportional to damage, minimum 12 frames
+        enemy.aiTimer = Math.max(12, Math.floor(damage * 1.5));
+        // Release attack token if they had one (interrupted mid-attack)
+        if (enemy.attackToken) {
+          attackTokens--;
+          enemy.attackToken = false;
+        }
+      }
+
       // Hitstop
       hitstopFrames = hitstop;
 
@@ -585,31 +597,69 @@ export default function App() {
     // ENEMY AI
     // ============================================================
     function updateEnemyAI(e: Enemy, dt: number) {
-      if (e.dead) return;
+      // BUG FIX #4: Process knockback physics BEFORE checking if dead
+      // This allows dead enemies to fly through the air
+      const hasKnockback = Math.abs(e.knockbackVx) > 0.1 || e.y < 0;
+      if (hasKnockback) {
+        // BUG FIX #3: Separate horizontal knockback from vertical gravity
+        // Horizontal knockback decays, but gravity ALWAYS applies when airborne
+        e.x += e.knockbackVx;
+        if (Math.abs(e.knockbackVx) > 0.1) {
+          e.knockbackVx *= 0.85;
+        } else {
+          e.knockbackVx = 0;
+        }
+        // Vertical: always apply gravity when in the air
+        e.y += e.knockbackVy;
+        e.knockbackVy += GRAVITY * 0.5;
+        // Bounce on landing for death knockback effect
+        if (e.y >= 0) {
+          if (e.dead && Math.abs(e.knockbackVy) > 1) {
+            // Bounce!
+            e.y = 0;
+            e.knockbackVy = -e.knockbackVy * 0.3;
+          } else {
+            e.y = 0;
+            e.knockbackVy = 0;
+          }
+        }
+        // During knockback, can't act (but dead enemies still need to animate)
+        if (!e.dead) return;
+      }
+
+      // BUG FIX #5: Release attack token when enemy dies
+      if (e.dead) {
+        if (e.attackToken) {
+          attackTokens--;
+          e.attackToken = false;
+        }
+        return;
+      }
 
       const distToPlayer = Math.abs(e.x - player.x);
       const zDist = Math.abs(e.z - player.z);
       const inRange = distToPlayer < (e.type === 'boss' ? 35 : 20);
       const zInRange = zDist < 12;
 
-      // Face player
-      e.facing = player.x > e.x ? 1 : -1;
+      // Face player (not during stun)
+      if (e.aiState !== 'stunned') {
+        e.facing = player.x > e.x ? 1 : -1;
+      }
 
-      // Knockback physics
-      if (Math.abs(e.knockbackVx) > 0.1) {
-        e.x += e.knockbackVx;
-        e.knockbackVx *= 0.85;
-        e.y += e.knockbackVy;
-        e.knockbackVy += GRAVITY * 0.5;
-        if (e.y >= 0) { e.y = 0; e.knockbackVy = 0; e.knockbackVx *= 0.5; }
-        return; // Can't act during knockback
+      // BUG FIX #6: Stun state - enemy is interrupted when hit
+      if (e.aiState === 'stunned') {
+        e.aiTimer -= dt;
+        if (e.aiTimer <= 0) {
+          e.aiState = 'idle';
+          e.aiTimer = 15 + Math.random() * 20;
+        }
+        return;
       }
 
       e.aiTimer -= dt;
 
       switch (e.aiState) {
         case 'idle':
-          e.aiTimer -= dt;
           if (e.aiTimer <= 0) {
             if (distToPlayer > 60) {
               e.aiState = 'chase';
@@ -631,7 +681,6 @@ export default function App() {
           break;
 
         case 'chase':
-          e.aiTimer -= dt;
           {
             const speed = e.type === 'cultist' ? CULTIST_SPEED : (e.type === 'boss' ? BOSS_SPEED : ZOMBIE_SPEED);
             const spd = e.bossPhase === 2 ? speed * 1.5 : speed;
@@ -666,7 +715,6 @@ export default function App() {
           if (e.type === 'boss') {
             e.bossTelegraph = e.aiTimer;
           }
-          e.aiTimer -= dt;
           if (e.aiTimer <= 0) {
             e.aiState = 'attacking';
             const atkFrames = e.type === 'zombie' ? ZOMBIE_ATK_FRAMES :
@@ -707,7 +755,6 @@ export default function App() {
           break;
 
         case 'recover':
-          e.aiTimer -= dt;
           if (e.type === 'cultist') {
             // Cultist retreats
             e.x -= e.facing * CULTIST_SPEED * 0.5;
@@ -766,6 +813,34 @@ export default function App() {
         }
       }
 
+      // BUG FIX #7: Process gravity FIRST (before any returns)
+      // This prevents the player from freezing in the air during attacks
+      if (player.isJumping) {
+        player.vy += GRAVITY;
+        player.y += player.vy;
+        if (player.y >= 0) {
+          player.y = 0;
+          player.vy = 0;
+          player.isJumping = false;
+          player.squashX = 0.7;
+          player.squashY = 1.3;
+          // Dust
+          for (let i = 0; i < 3; i++) {
+            particles.push({
+              x: player.x + (Math.random() - 0.5) * 8,
+              y: player.z,
+              vx: (Math.random() - 0.5) * 1.5,
+              vy: -(Math.random() * 1),
+              life: 10 + Math.random() * 8,
+              maxLife: 18,
+              color: PAL.gray,
+              size: 1.5,
+              type: 'dust',
+            });
+          }
+        }
+      }
+
       // Dodge
       if (player.isDodging) {
         player.dodgeTimer -= dt;
@@ -820,6 +895,14 @@ export default function App() {
             }
           }
         }
+
+        // BUG FIX #2: Read attack input DURING attack to fill the buffer
+        // This allows the combo to chain properly
+        if (isKeyJustPressed('j')) {
+          // Buffer the attack input for later execution
+          player.inputBuffer = { action: 'attack', timer: 10 }; // Increased from 6 to 10 frames
+        }
+
         // Allow movement during attack (reduced)
         const [ax] = getInputAxis();
         if (Math.abs(ax) > 0.1) {
@@ -855,32 +938,8 @@ export default function App() {
         sfxJump();
       }
 
-      // Gravity
-      if (player.isJumping) {
-        player.vy += GRAVITY;
-        player.y += player.vy;
-        if (player.y >= 0) {
-          player.y = 0;
-          player.vy = 0;
-          player.isJumping = false;
-          player.squashX = 0.7;
-          player.squashY = 1.3;
-          // Dust
-          for (let i = 0; i < 3; i++) {
-            particles.push({
-              x: player.x + (Math.random() - 0.5) * 8,
-              y: player.z,
-              vx: (Math.random() - 0.5) * 1.5,
-              vy: -(Math.random() * 1),
-              life: 10 + Math.random() * 8,
-              maxLife: 18,
-              color: PAL.gray,
-              size: 1.5,
-              type: 'dust',
-            });
-          }
-        }
-      }
+      // Gravity is processed at the top of updatePlayer (before attack logic)
+      // to fix bug #7 (air attack freeze)
 
       // Attack input
       if (isKeyJustPressed('j')) {
@@ -1593,24 +1652,24 @@ export default function App() {
       // Poll gamepad
       pollGamepad();
 
-      // Fixed timestep updates - process input only on first update
-      let firstUpdate = true;
+      // Fixed timestep updates
+      // BUG FIX #1: Only clear input AFTER an update actually ran
+      let didUpdate = false;
       while (accumulator >= FRAME_TIME) {
-        if (!firstUpdate) {
-          // Clear just-pressed for subsequent updates in same frame
-          keysThisFrame = {};
-          for (const k in gpJustPressed) gpJustPressed[k] = false;
-        }
         update(1); // dt = 1 frame
         accumulator -= FRAME_TIME;
-        firstUpdate = false;
+        didUpdate = true;
+        // Clear just-pressed keys right after each logical update
+        keysThisFrame = {};
+        for (const k in gpJustPressed) gpJustPressed[k] = false;
       }
 
       render();
 
-      // Clear just-pressed keys at end of frame
-      keysThisFrame = {};
-      for (const k in gpJustPressed) gpJustPressed[k] = false;
+      // BUG FIX #1: Only clear if no update ran (edge case for safety)
+      if (!didUpdate) {
+        // Don't clear here - preserve input for next frame's update
+      }
 
       requestAnimationFrame(gameLoop);
     }
